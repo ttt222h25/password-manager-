@@ -2,14 +2,15 @@ package com.localvault.app
 
 import android.os.Bundle
 import android.view.WindowManager
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.fragment.app.FragmentActivity
 import com.localvault.app.ui.VaultApp
 import com.localvault.app.ui.VaultTheme
 
-class MainActivity : ComponentActivity() {
+// FragmentActivity (a ComponentActivity) is needed for the fingerprint/PIN prompt.
+class MainActivity : FragmentActivity() {
     private val viewModel: VaultViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {

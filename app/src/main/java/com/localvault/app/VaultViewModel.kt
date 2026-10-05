@@ -15,7 +15,6 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.localvault.core.Account
 import com.localvault.core.InvalidVaultFileException
-import com.localvault.core.UnlockedVault
 import com.localvault.core.Vault
 import com.localvault.core.VaultStore
 import com.localvault.core.WrongPasswordException
@@ -27,7 +26,6 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 sealed interface Screen {
-    data object Setup : Screen
     data object Unlock : Screen
     data object Home : Screen
     data class FolderDetail(val folderId: String) : Screen
@@ -36,18 +34,26 @@ sealed interface Screen {
 }
 
 class VaultViewModel(private val app: Application) : AndroidViewModel(app) {
-    private val store = VaultStore(File(app.filesDir, "vault.enc"))
+    private val store = VaultStore(File(app.filesDir, "vault.enc"), keyProvider = DeviceKey::get)
 
-    private var hasVault by mutableStateOf(store.exists())
-    private var unlocked by mutableStateOf<UnlockedVault?>(null)
+    /** The decrypted vault while unlocked; null while locked. */
+    private var current by mutableStateOf<Vault?>(null)
     private val backStack = mutableStateListOf<Screen>()
 
-    /** True while the slow master-password check (key derivation) runs. */
+    /** True while slow work runs (opening the vault, making or restoring a backup). */
     var busy by mutableStateOf(false)
         private set
 
-    /** Error shown inline on the setup / unlock / settings screens. */
+    /** Error shown on the unlock screen. */
     var error by mutableStateOf<String?>(null)
+        private set
+
+    /** The vault file exists but couldn't be opened; the unlock screen then offers a restore. */
+    var loadFailed by mutableStateOf(false)
+        private set
+
+    /** The phone has no screen lock, so Vault opened without any check. */
+    var noScreenLock by mutableStateOf(false)
         private set
 
     /** One-off message shown in a snackbar. */
@@ -59,54 +65,59 @@ class VaultViewModel(private val app: Application) : AndroidViewModel(app) {
      */
     var externalActivityInProgress = false
 
+    /** Whether the unlock screen should open the fingerprint/PIN prompt by itself. */
+    private var autoPrompt = true
+
     private var clipboardClearJob: Job? = null
 
-    val vault: Vault get() = unlocked?.vault ?: Vault()
+    val vault: Vault get() = current ?: Vault()
 
     val screen: Screen
         get() = when {
-            unlocked == null -> if (hasVault) Screen.Unlock else Screen.Setup
+            current == null -> Screen.Unlock
             backStack.isEmpty() -> Screen.Home
             else -> backStack.last()
         }
 
-    val canGoBack: Boolean get() = unlocked != null && backStack.isNotEmpty()
+    val canGoBack: Boolean get() = current != null && backStack.isNotEmpty()
 
     fun navigate(to: Screen) {
-        error = null
         backStack.add(to)
     }
 
     fun back() {
-        error = null
         if (backStack.isNotEmpty()) backStack.removeAt(backStack.lastIndex)
     }
 
-    fun createVault(password: String, confirm: String) {
-        error = when {
-            password.length < 8 -> "Use at least 8 characters"
-            password != confirm -> "The two passwords don't match"
-            else -> null
-        }
-        if (error != null) return
+    /** Returns true once after each lock, so the prompt opens automatically but never loops. */
+    fun consumeAutoPrompt(): Boolean = autoPrompt.also { autoPrompt = false }
+
+    fun showError(text: String) {
+        error = text.ifEmpty { null }
+    }
+
+    /** Called after the phone's lock check passed (or when the phone has no screen lock). */
+    fun unlock(phoneHasScreenLock: Boolean) {
+        noScreenLock = !phoneHasScreenLock
         runSlow(
-            work = { store.create(password.toCharArray()) },
+            work = { store.load() },
             onSuccess = {
-                hasVault = true
-                unlocked = it
+                loadFailed = false
+                current = it
+            },
+            onFailure = { e ->
+                loadFailed = true
+                error = "Your saved passwords couldn't be opened (${e.message}). " +
+                    "If you have a backup file, restore it below."
             },
         )
     }
 
-    fun unlock(password: String) {
-        if (password.isEmpty()) return
-        runSlow(work = { store.unlock(password.toCharArray()) }, onSuccess = { unlocked = it })
-    }
-
     fun lock() {
-        unlocked = null
+        current = null
         backStack.clear()
         error = null
+        autoPrompt = true
     }
 
     fun addFolder(name: String) {
@@ -137,55 +148,43 @@ class VaultViewModel(private val app: Application) : AndroidViewModel(app) {
         message = "Account deleted"
     }
 
-    fun changePassword(current: String, new: String, confirm: String) {
-        error = when {
-            new.length < 8 -> "Use at least 8 characters for the new password"
-            new != confirm -> "The new passwords don't match"
-            else -> null
-        }
-        if (error != null) return
+    /** Writes an encrypted backup of the vault, locked with [password], to [uri]. */
+    fun exportBackup(uri: Uri, password: String) {
+        val vault = current ?: return
         runSlow(
             work = {
-                // Re-derive from the typed current password to prove the person holding the phone knows it.
-                store.unlock(current.toCharArray())
-                store.changePassword(unlocked ?: throw IllegalStateException("Vault is locked"), new.toCharArray())
+                val bytes = store.exportBackup(vault, password.toCharArray())
+                val out = app.contentResolver.openOutputStream(uri, "wt")
+                    ?: throw IllegalStateException("Could not open file")
+                out.use { it.write(bytes) }
             },
-            onSuccess = {
-                unlocked = it
-                message = "Master password changed"
-            },
-            wrongPasswordText = "Current master password is wrong",
+            onSuccess = { message = "Backup saved. Keep the backup password somewhere safe." },
+            onFailure = { message = "Backup failed: ${it.message}" },
         )
     }
 
-    fun exportBackup(uri: Uri) {
-        viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                runCatching {
-                    val out = app.contentResolver.openOutputStream(uri, "wt") ?: throw IllegalStateException("Could not open file")
-                    out.use { it.write(store.exportEncrypted()) }
-                }
-            }
-            message = if (result.isSuccess) "Backup saved" else "Backup failed: ${result.exceptionOrNull()?.message}"
-        }
-    }
-
-    /** Restores a backup file. [password] is the master password the backup was made with. */
+    /** Restores a backup file. [password] is the password the backup was made with. */
     fun importBackup(uri: Uri, password: String) {
         runSlow(
             work = {
                 val bytes = app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
                     ?: throw IllegalStateException("Could not open file")
-                store.importEncrypted(bytes, password.toCharArray())
+                store.importBackup(bytes, password.toCharArray())
             },
             onSuccess = {
-                hasVault = true
-                unlocked = it
+                loadFailed = false
+                error = null
+                current = it
                 backStack.clear()
                 message = "Backup restored"
             },
-            wrongPasswordText = "Wrong master password for that backup",
-            useSnackbar = true,
+            onFailure = { e ->
+                message = when (e) {
+                    is WrongPasswordException -> "Wrong password for that backup"
+                    is InvalidVaultFileException -> "That file is not a Vault backup"
+                    else -> "Restore failed: ${e.message}"
+                }
+            },
         )
     }
 
@@ -219,35 +218,25 @@ class VaultViewModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     private fun update(transform: (Vault) -> Vault) {
-        val current = unlocked ?: return
+        val vault = current ?: return
+        val updated = transform(vault)
         try {
-            // AES on a small file takes milliseconds; the slow KDF isn't involved here.
-            unlocked = store.save(current, transform(current.vault))
+            // AES on a small file takes milliseconds.
+            store.save(updated)
+            current = updated
         } catch (e: Exception) {
             message = "Could not save: ${e.message}"
         }
     }
 
-    private fun <T> runSlow(
-        work: () -> T,
-        onSuccess: (T) -> Unit,
-        wrongPasswordText: String = "Wrong master password",
-        useSnackbar: Boolean = false,
-    ) {
+    private fun <T> runSlow(work: () -> T, onSuccess: (T) -> Unit, onFailure: (Throwable) -> Unit) {
         if (busy) return
         busy = true
         error = null
         viewModelScope.launch {
             val result = withContext(Dispatchers.Default) { runCatching(work) }
             busy = false
-            result.onSuccess(onSuccess).onFailure { e ->
-                val text = when (e) {
-                    is WrongPasswordException -> wrongPasswordText
-                    is InvalidVaultFileException -> "That file is not a Vault backup (${e.message})"
-                    else -> "Something went wrong: ${e.message}"
-                }
-                if (useSnackbar) message = text else error = text
-            }
+            result.onSuccess(onSuccess).onFailure(onFailure)
         }
     }
 

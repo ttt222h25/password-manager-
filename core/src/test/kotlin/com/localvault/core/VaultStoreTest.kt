@@ -1,6 +1,5 @@
 package com.localvault.core
 
-import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -8,13 +7,23 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.util.Base64
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
 
 class VaultStoreTest {
     @get:Rule
     val tmp = TemporaryFolder()
 
+    private val deviceKey = newKey()
+
+    private fun newKey(): SecretKey = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+
+    private val vaultFile get() = File(tmp.root, "vault.enc")
+
     // Low iteration count keeps the tests fast; the app uses VaultCrypto.DEFAULT_ITERATIONS.
-    private fun store(file: File = File(tmp.root, "vault.enc")) = VaultStore(file, iterations = 1_000)
+    private fun store(file: File = vaultFile, key: SecretKey = deviceKey) =
+        VaultStore(file, keyProvider = { key }, backupIterations = 1_000)
 
     private fun account(folderId: String, label: String = "Main") = Account(
         id = Vault.newId(),
@@ -25,110 +34,116 @@ class VaultStoreTest {
         notes = "2FA on phone",
     )
 
-    @Test
-    fun createMakesDefaultFolders() {
-        val store = store()
-        assertFalse(store.exists())
-        val unlocked = store.create("master".toCharArray())
-        assertTrue(store.exists())
-        assertEquals(Vault.DEFAULT_FOLDER_NAMES, unlocked.vault.folders.map { it.name })
+    private fun vaultWithAccounts(): Vault {
+        val vault = Vault.withDefaultFolders()
+        val steam = vault.folders.first { it.name == "Steam" }
+        return vault.upsertAccount(account(steam.id, "Main")).upsertAccount(account(steam.id, "Alt"))
     }
 
     @Test
-    fun savedAccountsSurviveLockAndUnlock() {
-        val store = store()
-        var unlocked = store.create("master".toCharArray())
-        val steam = unlocked.vault.folders.first { it.name == "Steam" }
-        val main = account(steam.id, "Main")
-        val alt = account(steam.id, "Alt")
-        unlocked = store.save(unlocked, unlocked.vault.upsertAccount(main).upsertAccount(alt))
+    fun firstLoadCreatesDefaultFolders() {
+        assertFalse(vaultFile.exists())
+        val vault = store().load()
+        assertTrue(vaultFile.exists())
+        assertEquals(Vault.DEFAULT_FOLDER_NAMES, vault.folders.map { it.name })
+        assertEquals(vault, store().load())
+    }
 
-        val reopened = store().unlock("master".toCharArray())
-        assertEquals(listOf(alt, main), reopened.vault.accountsIn(steam.id))
+    @Test
+    fun savedAccountsSurviveReopening() {
+        val vault = vaultWithAccounts()
+        store().save(vault)
+        assertEquals(vault, store().load())
     }
 
     @Test
     fun fileDoesNotContainPlaintext() {
-        val file = File(tmp.root, "vault.enc")
-        val store = store(file)
-        val unlocked = store.create("master".toCharArray())
-        store.save(unlocked, unlocked.vault.upsertAccount(account(unlocked.vault.folders[0].id)))
-        val raw = file.readBytes().decodeToString()
+        store().save(vaultWithAccounts())
+        val raw = vaultFile.readBytes().decodeToString()
         assertFalse(raw.contains("hunter2"))
         assertFalse(raw.contains("Steam"))
         assertFalse(raw.contains("player@example.com"))
     }
 
-    @Test(expected = WrongPasswordException::class)
-    fun wrongPasswordIsRejected() {
-        store().create("master".toCharArray())
-        store().unlock("not-master".toCharArray())
-    }
-
-    @Test(expected = WrongPasswordException::class)
-    fun tamperedCiphertextIsRejected() {
-        val file = File(tmp.root, "vault.enc")
-        store(file).create("master".toCharArray())
-        val bytes = file.readBytes()
-        bytes[bytes.size - 5] = (bytes[bytes.size - 5].toInt() xor 1).toByte()
-        file.writeBytes(bytes)
-        store(file).unlock("master".toCharArray())
-    }
-
-    @Test(expected = WrongPasswordException::class)
-    fun tamperedHeaderIsRejected() {
-        val file = File(tmp.root, "vault.enc")
-        store(file).create("master".toCharArray())
-        val bytes = file.readBytes()
-        bytes[12] = (bytes[12].toInt() xor 1).toByte() // inside the salt
-        file.writeBytes(bytes)
-        store(file).unlock("master".toCharArray())
+    @Test(expected = InvalidVaultFileException::class)
+    fun otherKeyCannotOpenVault() {
+        store().save(vaultWithAccounts())
+        store(key = newKey()).load()
     }
 
     @Test(expected = InvalidVaultFileException::class)
-    fun garbageIsNotAVault() {
-        store().importEncrypted("hello world".toByteArray(), "master".toCharArray())
+    fun tamperedVaultIsRejected() {
+        store().save(vaultWithAccounts())
+        val bytes = vaultFile.readBytes()
+        bytes[bytes.size - 5] = (bytes[bytes.size - 5].toInt() xor 1).toByte()
+        vaultFile.writeBytes(bytes)
+        store().load()
     }
 
     @Test
-    fun changePasswordReEncrypts() {
-        val store = store()
-        val unlocked = store.create("old".toCharArray())
-        store.changePassword(unlocked, "new".toCharArray())
-        assertEquals(unlocked.vault, store().unlock("new".toCharArray()).vault)
+    fun backupRestoresOnAnotherPhone() {
+        val vault = vaultWithAccounts()
+        val backup = store().exportBackup(vault, "backup-pw".toCharArray())
+        assertFalse(backup.decodeToString().contains("hunter2"))
+
+        val otherPhoneFile = File(tmp.root, "other/vault.enc")
+        val otherPhone = store(otherPhoneFile, newKey())
+        otherPhone.load()
+        assertEquals(vault, otherPhone.importBackup(backup, "backup-pw".toCharArray()))
+        assertEquals(vault, otherPhone.load())
+    }
+
+    @Test
+    fun backupWithWrongPasswordKeepsExistingVault() {
+        val original = vaultWithAccounts()
+        store().save(original)
+        val backup = store().exportBackup(Vault.withDefaultFolders(), "backup-pw".toCharArray())
         try {
-            store().unlock("old".toCharArray())
-            throw AssertionError("old password still works")
-        } catch (expected: WrongPasswordException) {
-        }
-    }
-
-    @Test
-    fun exportThenImportOnAnotherDevice() {
-        val phoneA = store(File(tmp.root, "a/vault.enc"))
-        var unlocked = phoneA.create("master".toCharArray())
-        unlocked = phoneA.save(unlocked, unlocked.vault.addFolder("Epic Games"))
-        val backup = phoneA.exportEncrypted()
-
-        val phoneB = store(File(tmp.root, "b/vault.enc"))
-        phoneB.create("other".toCharArray())
-        val imported = phoneB.importEncrypted(backup, "master".toCharArray())
-        assertEquals(unlocked.vault, imported.vault)
-        assertArrayEquals(backup, File(tmp.root, "b/vault.enc").readBytes())
-        assertEquals(unlocked.vault, store(File(tmp.root, "b/vault.enc")).unlock("master".toCharArray()).vault)
-    }
-
-    @Test
-    fun importWithWrongPasswordKeepsExistingVault() {
-        val source = store(File(tmp.root, "a/vault.enc"))
-        source.create("master".toCharArray())
-        val target = store(File(tmp.root, "b/vault.enc"))
-        val original = target.create("mine".toCharArray())
-        try {
-            target.importEncrypted(source.exportEncrypted(), "wrong".toCharArray())
+            store().importBackup(backup, "wrong".toCharArray())
             throw AssertionError("import should fail")
         } catch (expected: WrongPasswordException) {
         }
-        assertEquals(original.vault, target.unlock("mine".toCharArray()).vault)
+        assertEquals(original, store().load())
+    }
+
+    @Test(expected = WrongPasswordException::class)
+    fun tamperedBackupIsRejected() {
+        val backup = store().exportBackup(vaultWithAccounts(), "backup-pw".toCharArray())
+        backup[12] = (backup[12].toInt() xor 1).toByte() // inside the salt
+        store().importBackup(backup, "backup-pw".toCharArray())
+    }
+
+    @Test(expected = InvalidVaultFileException::class)
+    fun garbageIsNotABackup() {
+        store().importBackup("hello world".toByteArray(), "pw".toCharArray())
+    }
+
+    @Test(expected = InvalidVaultFileException::class)
+    fun vaultFileIsNotABackup() {
+        store().save(vaultWithAccounts())
+        store().importBackup(vaultFile.readBytes(), "pw".toCharArray())
+    }
+
+    @Test
+    fun restoresBackupMadeByMasterPasswordVersion() {
+        // Exported by Vault 1.0.1 (master-password version) with master password "old-master".
+        val oldBackup = Base64.getDecoder().decode(
+            "TFZMVAEAAAPoEHornZScNmhvJdxfAR7t+UwMK6Goz+4gp44Fg6AcqZGqqdKoA2irI5xM5qwFTUejUa2BB/mAoAZDzj" +
+            "LNUe5eJ0v0W4nRZkAyS328OUbvn+wXu1Bs5aQWyezXCjDdmCBi5pqARkalnjtbKsm77FTyBJE3Pr+vHQSXgXq/MqH9" +
+            "k07avmEjQE3jqeRDrZpLyfNTfJCiLEvSwcLFuBDkF245F8O5miOIo2886ZfzAgD5RFb7Zz7grXHvNzpyoFOHoEQKqS" +
+            "2zC7GjBu6u3WS87ygV/wEwleDrVzxg+hgx1i3xeXlq3CxbX1mURPSbDItjWKuL9bKZiKRK4oaHGzJmhFtU4fb5tZmB" +
+            "EM/Zy/aNtFQuCs8ISq0hmOqYhDYiWWgpstKbrSd35OwYIEm2I1zv8jsJwgG5rmZNq5RdfMdqd8gWBqJToMktseKCun" +
+            "CQ1P1i4La44W6k74yXKz6f2b8Pfdd9Km3IwTvkzpLagi9iW1GqZOY9sVc5gGPZXDyoxSQD6sc9CqHJIuCjhU/KvBK4" +
+            "0rgS4QFfT/G+mPtTaQutSlrj2kCIH+VTUBAdNvjtUf8VBtE3WB3UdzeqK9/ExS3WHVi3ybYibNSYH/DQtbcIMKZ8hC" +
+            "Zd9cjpa7BOdsV+PY5PwyTiMBgUBRouiudYYUGgcyrjCUWgpx0nT+PB1DEtiP3yHv15L000iarhptw70bEnw3gRGE9k" +
+            "HIhzS/GdVaFXyXsjJJ2CHtilgvHX",
+        )
+        val vault = store().importBackup(oldBackup, "old-master".toCharArray())
+        val steam = vault.folders.first { it.name == "Steam" }
+        assertEquals(
+            listOf(Account("acc-1", steam.id, "Main", "gamer@example.com", "hunter2!", "notes here", 42L)),
+            vault.accountsIn(steam.id),
+        )
+        assertEquals(vault, store().load())
     }
 }

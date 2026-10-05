@@ -83,9 +83,16 @@ fun AccountCard(
             .clickable(onClick = onClick),
     ) {
         Column(Modifier.padding(start = 16.dp, top = 12.dp, bottom = 8.dp, end = 4.dp)) {
-            Text(account.label, style = MaterialTheme.typography.titleMedium)
             if (folderName != null) {
-                Text(folderName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    FolderIcon(folderName, size = 28.dp)
+                    Column(Modifier.padding(start = 10.dp)) {
+                        Text(account.label, style = MaterialTheme.typography.titleMedium)
+                        Text(folderName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                    }
+                }
+            } else {
+                Text(account.label, style = MaterialTheme.typography.titleMedium)
             }
             if (account.username.isNotEmpty()) {
                 FieldRow(
@@ -187,7 +194,7 @@ fun ConfirmDialog(
     )
 }
 
-/** Asks for the master password a backup file was made with. */
+/** Asks for the password a backup file was made with. */
 @Composable
 fun BackupPasswordDialog(onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
     var password by remember { mutableStateOf("") }
@@ -196,11 +203,15 @@ fun BackupPasswordDialog(onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
         title = { Text("Restore backup") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Enter the master password that was used when this backup was made. Restoring replaces everything currently saved in the app.")
+                Text(
+                    "Enter the password you chose when you made this backup. For a backup from the old " +
+                        "version of Vault, that's your old master password. Restoring replaces everything " +
+                        "currently saved in the app.",
+                )
                 PasswordField(
                     value = password,
                     onValueChange = { password = it },
-                    label = "Backup master password",
+                    label = "Backup password",
                     imeAction = ImeAction.Done,
                     onDone = { if (password.isNotEmpty()) onConfirm(password) },
                 )
@@ -208,6 +219,47 @@ fun BackupPasswordDialog(onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
         },
         confirmButton = {
             TextButton(onClick = { onConfirm(password) }, enabled = password.isNotEmpty()) { Text("Restore") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/** Asks for a new password to lock a backup file with. */
+@Composable
+fun NewBackupPasswordDialog(onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
+    var password by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    val submit = {
+        error = when {
+            password.length < 8 -> "Use at least 8 characters"
+            password != confirm -> "The two passwords don't match"
+            else -> null
+        }
+        if (error == null) onConfirm(password)
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Backup password") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "The backup file is locked with this password so it's safe to keep on a computer or USB " +
+                        "stick. You'll need it to restore the backup. Write it down; it can't be recovered.",
+                )
+                PasswordField(value = password, onValueChange = { password = it }, label = "Backup password")
+                PasswordField(
+                    value = confirm,
+                    onValueChange = { confirm = it },
+                    label = "Type it again",
+                    imeAction = ImeAction.Done,
+                    onDone = submit,
+                )
+                ErrorText(error)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = submit, enabled = password.isNotEmpty()) { Text("Choose where to save") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )

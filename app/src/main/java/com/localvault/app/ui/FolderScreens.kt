@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FloatingActionButton
@@ -52,6 +53,7 @@ import com.localvault.core.Vault
 @Composable
 fun HomeScreen(
     vault: Vault,
+    noScreenLock: Boolean,
     onOpenFolder: (Folder) -> Unit,
     onOpenAccount: (Account) -> Unit,
     onAddFolder: (String) -> Unit,
@@ -87,6 +89,9 @@ fun HomeScreen(
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 96.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
+            if (noScreenLock) {
+                item { NoScreenLockWarning() }
+            }
             item {
                 OutlinedTextField(
                     value = query,
@@ -145,7 +150,7 @@ fun HomeScreen(
 private fun FolderRow(folder: Folder, count: Int, onClick: () -> Unit) {
     Card(modifier = Modifier.fillMaxWidth().clickable(onClick = onClick)) {
         Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(VaultIcons.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            FolderIcon(folder.name, size = 44.dp)
             Spacer(Modifier.width(16.dp))
             Column(Modifier.weight(1f)) {
                 Text(folder.name, style = MaterialTheme.typography.titleMedium)
@@ -177,7 +182,13 @@ fun FolderScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(folder.name) },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        FolderIcon(folder.name, size = 32.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Text(folder.name)
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
                 },
@@ -234,6 +245,22 @@ fun FolderScreen(
                 onDelete()
             },
             onDismiss = { showDelete = false },
+        )
+    }
+}
+
+@Composable
+fun NoScreenLockWarning() {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(
+            "Your phone has no screen lock, so anyone holding it can open Vault. Set a PIN, pattern or " +
+                "fingerprint in Android Settings → Security, and Vault will ask for it.",
+            color = MaterialTheme.colorScheme.onErrorContainer,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(16.dp),
         )
     }
 }

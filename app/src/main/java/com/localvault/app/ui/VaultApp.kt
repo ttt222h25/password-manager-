@@ -21,14 +21,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.Lifecycle
+import com.localvault.app.PhoneLock
 import com.localvault.app.Screen
 import com.localvault.app.VaultViewModel
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import java.time.LocalDate
 
 @Composable
 fun VaultApp(vm: VaultViewModel) {
+    val activity = LocalContext.current as FragmentActivity
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(Unit) {
         snapshotFlow { vm.message }.filterNotNull().collect {
@@ -37,8 +43,18 @@ fun VaultApp(vm: VaultViewModel) {
         }
     }
 
-    // Backup file pickers (Android's own file picker; the app needs no storage permission).
+    val requestUnlock = {
+        if (PhoneLock.isSet(activity)) {
+            PhoneLock.prompt(activity, onSuccess = { vm.unlock(phoneHasScreenLock = true) }, onError = vm::showError)
+        } else {
+            vm.unlock(phoneHasScreenLock = false)
+        }
+    }
+
+    // Backup files go through Android's own file picker, so the app needs no storage permission.
     var pendingImport by remember { mutableStateOf<Uri?>(null) }
+    var choosingBackupPassword by remember { mutableStateOf(false) }
+    var exportPassword by remember { mutableStateOf<String?>(null) }
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         vm.externalActivityInProgress = false
         pendingImport = uri
@@ -47,15 +63,13 @@ fun VaultApp(vm: VaultViewModel) {
         ActivityResultContracts.CreateDocument("application/octet-stream"),
     ) { uri ->
         vm.externalActivityInProgress = false
-        if (uri != null) vm.exportBackup(uri)
+        val password = exportPassword
+        exportPassword = null
+        if (uri != null && password != null) vm.exportBackup(uri, password)
     }
     val startImport = {
         vm.externalActivityInProgress = true
         importLauncher.launch(arrayOf("*/*"))
-    }
-    val startExport = {
-        vm.externalActivityInProgress = true
-        exportLauncher.launch("vault-backup-${LocalDate.now()}.vault")
     }
 
     BackHandler(enabled = vm.canGoBack) { vm.back() }
@@ -63,17 +77,24 @@ fun VaultApp(vm: VaultViewModel) {
     Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize()) {
             when (val screen = vm.screen) {
-                Screen.Setup -> SetupScreen(
-                    error = vm.error,
-                    busy = vm.busy,
-                    onCreate = vm::createVault,
-                    onRestoreBackup = startImport,
-                )
-
-                Screen.Unlock -> UnlockScreen(error = vm.error, busy = vm.busy, onUnlock = vm::unlock)
+                Screen.Unlock -> {
+                    LaunchedEffect(Unit) {
+                        // Open the fingerprint/PIN prompt by itself once the app is on screen again.
+                        activity.lifecycle.currentStateFlow.first { it.isAtLeast(Lifecycle.State.RESUMED) }
+                        if (vm.consumeAutoPrompt()) requestUnlock()
+                    }
+                    UnlockScreen(
+                        error = vm.error,
+                        busy = vm.busy,
+                        showRestore = vm.loadFailed,
+                        onUnlock = requestUnlock,
+                        onRestoreBackup = startImport,
+                    )
+                }
 
                 Screen.Home -> HomeScreen(
                     vault = vm.vault,
+                    noScreenLock = vm.noScreenLock,
                     onOpenFolder = { vm.navigate(Screen.FolderDetail(it.id)) },
                     onOpenAccount = { vm.navigate(Screen.EditAccount(it.id, it.folderId)) },
                     onAddFolder = vm::addFolder,
@@ -117,11 +138,10 @@ fun VaultApp(vm: VaultViewModel) {
                 }
 
                 Screen.Settings -> SettingsScreen(
-                    error = vm.error,
                     busy = vm.busy,
+                    noScreenLock = vm.noScreenLock,
                     onBack = vm::back,
-                    onChangePassword = vm::changePassword,
-                    onExport = startExport,
+                    onExport = { choosingBackupPassword = true },
                     onImport = startImport,
                     onLock = vm::lock,
                 )
@@ -137,6 +157,18 @@ fun VaultApp(vm: VaultViewModel) {
 
             if (vm.busy) BusyOverlay()
         }
+    }
+
+    if (choosingBackupPassword) {
+        NewBackupPasswordDialog(
+            onConfirm = { password ->
+                choosingBackupPassword = false
+                exportPassword = password
+                vm.externalActivityInProgress = true
+                exportLauncher.launch("vault-backup-${LocalDate.now()}.vault")
+            },
+            onDismiss = { choosingBackupPassword = false },
+        )
     }
 
     pendingImport?.let { uri ->

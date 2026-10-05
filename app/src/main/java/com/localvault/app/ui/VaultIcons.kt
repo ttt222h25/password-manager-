@@ -34,11 +34,6 @@ object VaultIcons {
             "c0-1.1-.9-2-2-2zm0 16H8V7h11v14z",
     )
 
-    val Folder = icon(
-        "Folder",
-        "M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z",
-    )
-
     val Download = icon(
         "Download",
         "M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z",

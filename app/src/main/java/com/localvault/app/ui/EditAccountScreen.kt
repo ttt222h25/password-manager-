@@ -105,9 +105,10 @@ fun EditAccountScreen(
             Box {
                 OutlinedButton(onClick = { folderMenuOpen = true }, modifier = Modifier.fillMaxWidth()) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(VaultIcons.Folder, contentDescription = null)
+                        val folderName = folders.firstOrNull { it.id == folderId }?.name ?: "—"
+                        FolderIcon(folderName, size = 24.dp)
                         Text(
-                            "  Folder: " + (folders.firstOrNull { it.id == folderId }?.name ?: "—"),
+                            "  Folder: $folderName",
                             modifier = Modifier.weight(1f),
                         )
                         Icon(Icons.Filled.ArrowDropDown, contentDescription = null)
@@ -117,6 +118,7 @@ fun EditAccountScreen(
                     folders.forEach { folder ->
                         DropdownMenuItem(
                             text = { Text(folder.name) },
+                            leadingIcon = { FolderIcon(folder.name, size = 24.dp) },
                             onClick = {
                                 folderId = folder.id
                                 folderMenuOpen = false
